@@ -22,7 +22,9 @@ from fastapi import APIRouter, HTTPException, status, Depends
 
 from client import LlamaStackClientHolder
 from configuration import configuration
+from app.database import get_session
 import metrics
+from models.conversations import UserConversation
 from models.responses import QueryResponse, UnauthorizedResponse, ForbiddenResponse
 from models.requests import QueryRequest, Attachment
 import constants
@@ -110,6 +112,43 @@ def get_agent(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     return agent, conversation_id, session_id
 
 
+def validate_conversation_ownership(user_id: str, conversation_id: str) -> bool:
+    """Validate that the conversation belongs to the user."""
+    with get_session() as session:
+        conversation = (
+            session.query(UserConversation)
+            .filter_by(id=conversation_id, user_id=user_id)
+            .first()
+        )
+        return conversation is not None
+
+
+def persist_user_conversation_details(
+    user_id: str, conversation_id: str, model: str
+) -> None:
+    """Associate conversation to user in the database."""
+    with get_session() as session:
+        existing_conversation = (
+            session.query(UserConversation)
+            .filter_by(id=conversation_id, user_id=user_id)
+            .first()
+        )
+
+        if not existing_conversation:
+            conversation = UserConversation(
+                id=conversation_id, user_id=user_id, model=model, message_count=1
+            )
+            session.add(conversation)
+            logger.debug(
+                "Associated conversation %s to user %s", conversation_id, user_id
+            )
+        else:
+            existing_conversation.last_message_at = datetime.now(UTC)
+            existing_conversation.message_count += 1
+
+        session.commit()
+
+
 @router.post("/query", responses=query_response)
 def query_endpoint_handler(
     query_request: QueryRequest,
@@ -122,7 +161,23 @@ def query_endpoint_handler(
     llama_stack_config = configuration.llama_stack_configuration
     logger.info("LLama stack config: %s", llama_stack_config)
 
-    _user_id, _user_name, token = auth
+    user_id, _user_name, token = auth
+
+    # Validate conversation ownership if conversation_id is provided
+    if query_request.conversation_id:
+        if not validate_conversation_ownership(user_id, query_request.conversation_id):
+            logger.warning(
+                "User %s attempted to query conversation %s they don't own",
+                user_id,
+                query_request.conversation_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "response": "Access denied",
+                    "cause": "You do not have permission to access this conversation",
+                },
+            )
 
     try:
         # try to get Llama Stack client
@@ -154,6 +209,10 @@ def query_endpoint_handler(
                 truncated=False,  # TODO(lucasagomes): implement truncation as part of quota work
                 attachments=query_request.attachments or [],
             )
+
+        persist_user_conversation_details(
+            user_id=user_id, conversation_id=conversation_id, model=model_id
+        )
 
         return QueryResponse(conversation_id=conversation_id, response=response)
 

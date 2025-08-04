@@ -9,10 +9,18 @@ from fastapi import APIRouter, HTTPException, status, Depends
 
 from client import LlamaStackClientHolder
 from configuration import configuration
-from models.responses import ConversationResponse, ConversationDeleteResponse
+from models.responses import (
+    ConversationResponse,
+    ConversationDeleteResponse,
+    ConversationsListResponse,
+    ConversationDetails,
+)
 from auth import get_auth_dependency
+from app.database import get_session
+from models.conversations import UserConversation  # pylint: disable=ungrouped-imports
 from utils.endpoints import check_configuration_loaded
 from utils.suid import check_suid
+from utils.common import retrieve_user_id
 
 logger = logging.getLogger("app.endpoints.handlers")
 router = APIRouter(tags=["conversations"])
@@ -66,6 +74,31 @@ conversation_delete_responses: dict[int | str, dict[str, Any]] = {
     },
 }
 
+conversations_list_responses: dict[int | str, dict[str, Any]] = {
+    200: {
+        "conversations": [
+            {
+                "conversation_id": "123e4567-e89b-12d3-a456-426614174000",
+                "created_at": "2024-01-01T00:00:00Z",
+                "last_message_at": "2024-01-01T00:05:00Z",
+                "message_count": 5,
+            },
+            {
+                "conversation_id": "456e7890-e12b-34d5-a678-901234567890",
+                "created_at": "2024-01-01T01:00:00Z",
+                "last_message_at": "2024-01-01T01:02:00Z",
+                "message_count": 2,
+            },
+        ]
+    },
+    503: {
+        "detail": {
+            "response": "Unable to connect to Llama Stack",
+            "cause": "Connection error.",
+        }
+    },
+}
+
 
 def simplify_session_data(session_dict: dict) -> list[dict[str, Any]]:
     """Simplify session data to include only essential conversation information.
@@ -107,6 +140,58 @@ def simplify_session_data(session_dict: dict) -> list[dict[str, Any]]:
         chat_history.append(simplified_turn)
 
     return chat_history
+
+
+@router.get("/conversations", responses=conversations_list_responses)
+def get_conversations_list_endpoint_handler(
+    _auth: Any = Depends(auth_dependency),
+) -> ConversationsListResponse:
+    """Handle request to retrieve all conversations for the authenticated user."""
+    check_configuration_loaded(configuration)
+
+    user_id = retrieve_user_id(_auth)
+    logger.info("Retrieving conversations for user %s", user_id)
+
+    with get_session() as session:
+        try:
+            # Get all conversations for this user
+            user_conversations = (
+                session.query(UserConversation).filter_by(user_id=user_id).all()
+            )
+
+            # Return conversation summaries with metadata
+            conversations = [
+                ConversationDetails(
+                    conversation_id=conv.id,
+                    created_at=conv.created_at.isoformat() if conv.created_at else None,
+                    last_message_at=(
+                        conv.last_message_at.isoformat()
+                        if conv.last_message_at
+                        else None
+                    ),
+                    message_count=conv.message_count,
+                    model=conv.model,
+                )
+                for conv in user_conversations
+            ]
+
+            logger.info(
+                "Found %d conversations for user %s", len(conversations), user_id
+            )
+
+            return ConversationsListResponse(conversations=conversations)
+
+        except Exception as e:
+            logger.exception(
+                "Error retrieving conversations for user %s: %s", user_id, e
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "response": "Unknown error",
+                    "cause": f"Unknown error while getting conversations for user {user_id}",
+                },
+            ) from e
 
 
 @router.get("/conversations/{conversation_id}", responses=conversation_responses)

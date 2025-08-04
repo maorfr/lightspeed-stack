@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.routing import Mount, Route, WebSocketRoute
 
 from app import routers
+from app.database import initialize_database, create_tables
 from configuration import configuration
 from log import get_logger
 import metrics
@@ -84,3 +85,6 @@ async def startup_event() -> None:
     logger.info("Setting up model metrics")
     await setup_model_metrics()
     logger.info("App startup complete")
+
+    initialize_database()
+    create_tables()

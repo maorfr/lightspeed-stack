@@ -13,18 +13,16 @@ from client import LlamaStackClientHolder, AsyncLlamaStackClientHolder
 from models.config import Configuration, ModelContextProtocolServer
 
 
-# TODO(lucasagomes): implement this function to retrieve user ID from auth
-def retrieve_user_id(auth: Any) -> str:  # pylint: disable=unused-argument
-    """Retrieve the user ID from the authentication handler.
+def retrieve_user_id(auth: Any) -> str:
+    """Retrieve the user ID from the authentication handler's tuple.
 
     Args:
-        auth: The Authentication handler (FastAPI Depends) that will
-            handle authentication Logic.
+        auth: The tuple returned by the authentication handler.
 
     Returns:
         str: The user ID.
     """
-    return "user_id_placeholder"
+    return auth[0]
 
 
 async def register_mcp_servers_async(

@@ -38,6 +38,8 @@ from app.endpoints.query import (
     store_transcript,
     select_model_and_provider_id,
     validate_attachments_metadata,
+    validate_conversation_ownership,
+    persist_user_conversation_details,
 )
 
 logger = logging.getLogger("app.endpoints.handlers")
@@ -424,7 +426,23 @@ async def streaming_query_endpoint_handler(
     llama_stack_config = configuration.llama_stack_configuration
     logger.info("LLama stack config: %s", llama_stack_config)
 
-    _user_id, _user_name, token = auth
+    user_id, _user_name, token = auth
+
+    # Validate conversation ownership if conversation_id is provided
+    if query_request.conversation_id:
+        if not validate_conversation_ownership(user_id, query_request.conversation_id):
+            logger.warning(
+                "User %s attempted to query conversation %s they don't own",
+                user_id,
+                query_request.conversation_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "response": "Access denied",
+                    "cause": "You do not have permission to access this conversation",
+                },
+            )
 
     try:
         # try to get Llama Stack client
@@ -474,6 +492,10 @@ async def streaming_query_endpoint_handler(
                     # of quota work
                     attachments=query_request.attachments or [],
                 )
+
+        persist_user_conversation_details(
+            user_id=user_id, conversation_id=conversation_id, model=model_id
+        )
 
         # Update metrics for the LLM call
         metrics.llm_calls_total.labels(provider_id, model_id).inc()

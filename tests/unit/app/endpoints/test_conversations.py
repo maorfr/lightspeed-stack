@@ -7,9 +7,14 @@ from llama_stack_client import APIConnectionError, NotFoundError
 from app.endpoints.conversations import (
     get_conversation_endpoint_handler,
     delete_conversation_endpoint_handler,
+    get_conversations_list_endpoint_handler,
     simplify_session_data,
 )
-from models.responses import ConversationResponse, ConversationDeleteResponse
+from models.responses import (
+    ConversationResponse,
+    ConversationDeleteResponse,
+    ConversationsListResponse,
+)
 from configuration import AppConfig
 
 MOCK_AUTH = ("mock_user_id", "mock_username", "mock_token")
@@ -228,7 +233,6 @@ class TestGetConversationEndpoint:
         mocker.patch("app.endpoints.conversations.configuration", setup_configuration)
         mocker.patch("app.endpoints.conversations.check_suid", return_value=True)
 
-
         # Mock LlamaStackClientHolder to raise NotFoundError
         mock_client = mocker.Mock()
         mock_client.agents.session.list.side_effect = NotFoundError(
@@ -246,7 +250,7 @@ class TestGetConversationEndpoint:
         assert "Conversation not found" in exc_info.value.detail["response"]
         assert "could not be retrieved" in exc_info.value.detail["cause"]
         assert VALID_CONVERSATION_ID in exc_info.value.detail["cause"]
-        
+
     def test_session_retrieve_exception(self, mocker, setup_configuration):
         """Test the endpoint when session retrieval raises an exception."""
         mocker.patch("app.endpoints.conversations.configuration", setup_configuration)
@@ -422,3 +426,114 @@ class TestDeleteConversationEndpoint:
         mock_client.agents.session.delete.assert_called_once_with(
             agent_id=VALID_CONVERSATION_ID, session_id=VALID_CONVERSATION_ID
         )
+
+
+class TestGetConversationsListEndpoint:
+    """Test cases for the GET /conversations endpoint."""
+
+    def test_configuration_not_loaded(self, mocker):
+        """Test the endpoint when configuration is not loaded."""
+        mocker.patch("app.endpoints.conversations.configuration", None)
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_conversations_list_endpoint_handler(_auth=MOCK_AUTH)
+
+        assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert "Configuration is not loaded" in exc_info.value.detail["response"]
+
+    def test_successful_conversations_list_retrieval(self, mocker, setup_configuration):
+        """Test successful retrieval of conversations list."""
+        mocker.patch("app.endpoints.conversations.configuration", setup_configuration)
+
+        # Mock retrieve_user_id
+        mocker.patch(
+            "app.endpoints.conversations.retrieve_user_id", return_value="mock_user_id"
+        )
+
+        # Mock database session and query results
+        mock_conversation1 = mocker.Mock()
+        mock_conversation1.id = "123e4567-e89b-12d3-a456-426614174000"
+        mock_conversation2 = mocker.Mock()
+        mock_conversation2.id = "456e7890-e12b-34d5-a678-901234567890"
+
+        mock_session = mocker.Mock()
+        mock_session.query.return_value.filter_by.return_value.all.return_value = [
+            mock_conversation1,
+            mock_conversation2,
+        ]
+
+        mocker.patch(
+            "app.endpoints.conversations.get_session", return_value=mock_session
+        )
+
+        response = get_conversations_list_endpoint_handler(_auth=MOCK_AUTH)
+
+        assert isinstance(response, ConversationsListResponse)
+        assert len(response.conversations) == 2
+        assert (
+            response.conversations[0].conversation_id
+            == "123e4567-e89b-12d3-a456-426614174000"
+        )
+        assert (
+            response.conversations[1].conversation_id
+            == "456e7890-e12b-34d5-a678-901234567890"
+        )
+
+        # Verify database session was closed
+        mock_session.close.assert_called_once()
+
+    def test_empty_conversations_list(self, mocker, setup_configuration):
+        """Test when user has no conversations."""
+        mocker.patch("app.endpoints.conversations.configuration", setup_configuration)
+
+        # Mock retrieve_user_id
+        mocker.patch(
+            "app.endpoints.conversations.retrieve_user_id", return_value="mock_user_id"
+        )
+
+        # Mock database session with no results
+        mock_session = mocker.Mock()
+        mock_session.query.return_value.filter_by.return_value.all.return_value = []
+
+        mocker.patch(
+            "app.endpoints.conversations.get_session", return_value=mock_session
+        )
+
+        response = get_conversations_list_endpoint_handler(_auth=MOCK_AUTH)
+
+        assert isinstance(response, ConversationsListResponse)
+        assert len(response.conversations) == 0
+        assert response.conversations == []
+
+        # Verify database session was closed
+        mock_session.close.assert_called_once()
+
+    def test_database_exception(self, mocker, setup_configuration):
+        """Test when database query raises an exception."""
+        mocker.patch("app.endpoints.conversations.configuration", setup_configuration)
+
+        # Mock retrieve_user_id
+        mocker.patch(
+            "app.endpoints.conversations.retrieve_user_id", return_value="mock_user_id"
+        )
+
+        # Mock database session to raise exception
+        mock_session = mocker.Mock()
+        mock_session.query.side_effect = Exception("Database error")
+
+        mocker.patch(
+            "app.endpoints.conversations.get_session", return_value=mock_session
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_conversations_list_endpoint_handler(_auth=MOCK_AUTH)
+
+        assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert "Unknown error" in exc_info.value.detail["response"]
+        assert (
+            "Unknown error while getting conversations for user"
+            in exc_info.value.detail["cause"]
+        )
+
+        # Verify database session was closed even after exception
+        mock_session.close.assert_called_once()
